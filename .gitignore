@@ -1,0 +1,18 @@
+# Ignore video files
+input_videos/
+output_data/
+*.mp4
+
+# Ignore CSV output files
+*.csv
+
+# Ignore Python cache
+__pycache__/
+*.py[cod]
+
+# Ignore virtual environment
+venv311/
+
+# Optional: system files
+.DS_Store
+Thumbs.db
