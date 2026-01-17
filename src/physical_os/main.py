@@ -39,6 +39,7 @@ from physics_intelligence import PhysicalIntelligence
 from visualizer_live import AdvancedVisualizer
 from dynamics_engine import DynamicsEngine
 from grf_estimator import GRFEstimator
+from constraints import MotionConstraintSystem
 
 
 def process_video(video_path, visual_mode=False, smoothing_mode='one_euro', 
@@ -110,6 +111,10 @@ def process_video(video_path, visual_mode=False, smoothing_mode='one_euro',
         physics = PhysicalIntelligence(body_mass=body_mass)
         print(f"[PHYSICS] Center of Mass calculator initialized (mass={body_mass}kg)")
     
+    # Initialize constraint system
+    constraints = MotionConstraintSystem()
+    print("[SAFETY] Joint constraint system initialized")
+    
     # Define joint angles to export
     joint_names = ['R_Shoulder_Flex', 'R_Elbow', 'L_Shoulder_Flex', 'L_Elbow']
     
@@ -145,15 +150,50 @@ def process_video(video_path, visual_mode=False, smoothing_mode='one_euro',
     else:
         logger = DataLogger(str(output_csv), joint_names)
     
-    frame_count = 0
-    processed_count = 0
+    # State for recording
+    recording_active = False
+    current_label = "unlabeled"
+    recording_logger = None
+    recording_start_timestamp = 0
+    recording_index = 1
     
-    print("[PIPELINE] Starting frame-by-frame processing...")
+    def on_toggle(active):
+        nonlocal recording_active, current_label, recording_logger, recording_start_timestamp, recording_index
+        recording_active = active
+        if active:
+            filename = f"{current_label}_{recording_index:03d}_enhanced.csv"
+            output_path = output_dir / filename
+            recording_logger = DualLogger(str(output_path), joint_names, position_names)
+            recording_start_timestamp = -1
+            if viz: viz.recording_start_time = -1
+            print(f"[RECORDING] Started: {filename}")
+        else:
+            if recording_logger:
+                recording_logger.close()
+                try:
+                    dyn_engine = DynamicsEngine(fps=fps)
+                    dyn_engine.process_csv_data(recording_logger.enhanced_path)
+                    grf_engine = GRFEstimator()
+                    grf_engine.process_csv_data(recording_logger.enhanced_path)
+                except: pass
+                print(f"[RECORDING] Saved: {recording_logger.enhanced_path}")
+                recording_logger = None
+                recording_index += 1
     
+    def on_label(label):
+        nonlocal current_label
+        current_label = label
+
     # Initialize Advanced Visualizer
     viz = None
     if visual_mode:
         viz = AdvancedVisualizer(history_size=100)
+        viz.on_record_toggle = on_toggle
+        viz.on_label_change = on_label
+    
+    frame_count = 0
+    processed_count = 0
+    print("[PIPELINE] Starting frame-by-frame processing...")
     
     while True:
         ret, frame = cap.read()
@@ -214,6 +254,9 @@ def process_video(video_path, visual_mode=False, smoothing_mode='one_euro',
         else:
             smoothed_angles = raw_angles
         
+        # PHASE 4.5: Constraints - Apply safety limits
+        clamped_angles = constraints.apply_constraints(smoothed_angles)
+        
         # PHASE 5: 3D Relative Coordinates - Intent-based motion data
         positions_dict = {}
         if export_3d_coords:
@@ -230,10 +273,19 @@ def process_video(video_path, visual_mode=False, smoothing_mode='one_euro',
             positions_dict = format_positions_for_csv(key_positions)
         
         # PHASE 6: Data Logging
+        if recording_active and recording_logger:
+            if recording_start_timestamp == -1:
+                recording_start_timestamp = timestamp
+                viz.recording_start_time = timestamp
+            
+            rel_timestamp = timestamp - recording_start_timestamp
+            recording_logger.log_frame(rel_timestamp, clamped_angles, positions_dict)
+        
+        # Continuous background logging (optional, kept for persistence)
         if export_3d_coords and positions_dict:
-            logger.log_frame(timestamp, smoothed_angles, positions_dict)
+            logger.log_frame(timestamp, clamped_angles, positions_dict)
         else:
-            logger.log_frame(timestamp, smoothed_angles)
+            logger.log_frame(timestamp, clamped_angles)
         
         processed_count += 1
         
@@ -247,10 +299,17 @@ def process_video(video_path, visual_mode=False, smoothing_mode='one_euro',
             for joint_name in joint_names:
                 raw_angle = raw_angles.get(joint_name, 0)
                 smooth_angle = smoothed_angles.get(joint_name, 0)
+                clamped_angle = clamped_angles.get(joint_name, 0)
                 
-                # Show both raw and smoothed for comparison
-                text = f"{joint_name}: {smooth_angle:.1f}° (raw: {raw_angle:.1f}°)"
-                color = (0, 255, 0) if 0 <= smooth_angle <= 180 else (0, 0, 255)
+                # Show comparison
+                suffix = ""
+                if abs(clamped_angle - smooth_angle) > 0.1:
+                    suffix = " [CLAMPED]"
+                
+                text = f"{joint_name}: {clamped_angle:.1f}° (raw: {raw_angle:.1f}°){suffix}"
+                color = (0, 255, 0) if suffix == "" else (0, 165, 255) # Green if ok, Orange if clamped
+                if not (0 <= clamped_angle <= 180): color = (0, 0, 255) # Red if extreme error
+                
                 cv2.putText(frame_with_skeleton, text, (10, y_offset),
                            cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 1)
                 y_offset += 20
@@ -277,15 +336,15 @@ def process_video(video_path, visual_mode=False, smoothing_mode='one_euro',
             
             # Update Advanced Visualizer (Graphs)
             if viz:
-                # Extract CoM_Y and Right_Elbow angle for graphs
-                com_y = 0
+                # Pass full 3D CoM for balance visualization
+                com_3d = None
                 if export_com and 'CoM' in key_positions:
-                    com_y = key_positions['CoM'][1] # Y is index 1
+                    com_3d = key_positions['CoM']
                 
                 elbow_angle = smoothed_angles.get('R_Elbow', 0)
                 
                 # Update visualizer with 3D landmarks and graph data
-                viz.update(landmarks, com_y, elbow_angle, timestamp)
+                viz.update(landmarks, com_3d, elbow_angle, timestamp)
             
             cv2.imshow('PhysicalOS_V1 - Enhanced Motion Capture', frame_with_skeleton)
             if cv2.waitKey(1) & 0xFF == ord('q'):
@@ -418,6 +477,10 @@ def process_live_camera(smoothing_mode='one_euro', export_3d_coords=True,
         physics = PhysicalIntelligence(body_mass=body_mass)
         print(f"[PHYSICS] Center of Mass calculator initialized (mass={body_mass}kg)")
     
+    # Initialize constraint system
+    constraints = MotionConstraintSystem()
+    print("[SAFETY] Joint constraint system initialized")
+    
     # Define joint angles to export
     joint_names = ['R_Shoulder_Flex', 'R_Elbow', 'L_Shoulder_Flex', 'L_Elbow']
     
@@ -444,14 +507,54 @@ def process_live_camera(smoothing_mode='one_euro', export_3d_coords=True,
     else:
         logger = DataLogger(str(output_csv), joint_names)
     
+    # State for recording
+    recording_active = False
+    current_label = "unlabeled"
+    recording_logger = None
+    recording_start_timestamp = 0
+    recording_index = 1
+    
+    def on_toggle(active):
+        nonlocal recording_active, current_label, recording_logger, recording_start_timestamp, recording_index
+        recording_active = active
+        if active:
+            # Start new recording file
+            timestamp_str = datetime.now().strftime("%Y%m%d_%H%M%S")
+            filename = f"{current_label}_{recording_index:03d}_enhanced.csv"
+            output_path = output_dir / filename
+            recording_logger = DualLogger(str(output_path), joint_names, position_names)
+            recording_start_timestamp = -1 # Signal to set on first frame
+            viz.recording_start_time = -1 # Sync with viz
+            print(f"[RECORDING] Started: {filename}")
+        else:
+            if recording_logger:
+                recording_logger.close()
+                # Run post-processing on the recorded file
+                try:
+                    dyn_engine = DynamicsEngine(fps=fps)
+                    dyn_engine.process_csv_data(recording_logger.enhanced_path)
+                    grf_engine = GRFEstimator()
+                    grf_engine.process_csv_data(recording_logger.enhanced_path)
+                except: pass
+                print(f"[RECORDING] Stopped and saved: {recording_logger.enhanced_path}")
+                recording_logger = None
+                recording_index += 1
+    
+    def on_label(label):
+        nonlocal current_label
+        current_label = label
+        print(f"[RECORDING] Label set to: {label}")
+
+    # Initialize Advanced Visualizer
+    viz = AdvancedVisualizer(history_size=100)
+    viz.on_record_toggle = on_toggle
+    viz.on_label_change = on_label
+    
     frame_count = 0
     processed_count = 0
     start_time = datetime.now()
     
-    print("[PIPELINE] Camera active - Recording started...")
-    
-    # Initialize Advanced Visualizer
-    viz = AdvancedVisualizer(history_size=100)
+    print("[PIPELINE] Camera active - Recording ready...")
     
     while True:
         ret, frame = cap.read()
@@ -509,6 +612,9 @@ def process_live_camera(smoothing_mode='one_euro', export_3d_coords=True,
         else:
             smoothed_angles = raw_angles
         
+        # PHASE 4.5: Constraints
+        clamped_angles = constraints.apply_constraints(smoothed_angles)
+        
         # PHASE 5: 3D Relative Coordinates
         positions_dict = {}
         if export_3d_coords:
@@ -533,9 +639,13 @@ def process_live_camera(smoothing_mode='one_euro', export_3d_coords=True,
         # Display angles and info
         y_offset = 30
         for joint_name in joint_names:
+            clamped_angle = clamped_angles.get(joint_name, 0)
             smooth_angle = smoothed_angles.get(joint_name, 0)
-            text = f"{joint_name}: {smooth_angle:.1f} deg"
-            color = (0, 255, 0) if 0 <= smooth_angle <= 180 else (0, 0, 255)
+            
+            suffix = " [CLAMP]" if abs(clamped_angle - smooth_angle) > 0.1 else ""
+            text = f"{joint_name}: {clamped_angle:.1f} deg{suffix}"
+            
+            color = (0, 255, 0) if suffix == "" else (0, 165, 255)
             cv2.putText(frame_with_skeleton, text, (10, y_offset),
                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 1)
             y_offset += 20
@@ -552,11 +662,11 @@ def process_live_camera(smoothing_mode='one_euro', export_3d_coords=True,
         
         # Update Advanced Visualizer
         if viz:
-            com_y = 0
+            com_3d = None
             if export_com and 'CoM' in key_positions:
-                com_y = key_positions['CoM'][1]
+                com_3d = key_positions['CoM']
             elbow_angle = smoothed_angles.get('R_Elbow', 0)
-            viz.update(landmarks, com_y, elbow_angle, timestamp)
+            viz.update(landmarks, com_3d, elbow_angle, timestamp)
             
         cv2.imshow('PhysicalOS_V1 - Live Camera', frame_with_skeleton)
         if cv2.waitKey(1) & 0xFF == ord('q'):

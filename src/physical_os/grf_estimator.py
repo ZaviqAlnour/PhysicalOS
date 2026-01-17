@@ -59,11 +59,7 @@ class GRFEstimator:
             if left_ankle_y > 0.3 and right_ankle_y > 0.3:
                 return 'none'
             
-            # Check for double support
-            if diff < self.threshold:
-                return 'both'
-            
-            # Single support
+            # Strict single support enforcement: lowest foot is pivot
             return 'left' if left_ankle_y < right_ankle_y else 'right'
         
         else:  # Array
@@ -78,10 +74,7 @@ class GRFEstimator:
                 # Check for airborne
                 if left_y > 0.3 and right_y > 0.3:
                     result[i] = 'none'
-                # Double support
-                elif diff_i < self.threshold:
-                    result[i] = 'both'
-                # Single support
+                # Single support (strict enforcement)
                 else:
                     result[i] = 'left' if left_y < right_y else 'right'
             

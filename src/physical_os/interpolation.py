@@ -43,7 +43,7 @@ class FrameInterpolator:
         # Create target timestamps
         if target_timestamps is None:
             if target_fps is None:
-                target_fps = 60  # Default to 60 FPS
+                target_fps = 400  # Target 400 Hz as per requirements
             
             # Calculate original FPS
             dt_original = np.median(np.diff(timestamps))
@@ -95,7 +95,7 @@ class FrameInterpolator:
         
         # Create target timestamps
         if target_fps is None:
-            target_fps = 60
+            target_fps = 400 # Target 400 Hz
         
         dt_original = np.median(np.diff(timestamps))
         original_fps = 1.0 / dt_original
@@ -250,7 +250,7 @@ class MotionAnalyzer:
         self.velocity_calc = VelocityCalculator()
     
     def analyze_joint_motion(self, timestamps, angles, positions=None, 
-                            target_fps=60, calculate_derivatives=True):
+                            target_fps=400, calculate_derivatives=True):
         """
         Complete motion analysis for a joint.
         

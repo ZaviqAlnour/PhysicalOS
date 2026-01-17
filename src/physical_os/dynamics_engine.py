@@ -64,20 +64,24 @@ class DynamicsEngine:
         # Calculate time deltas
         if timestamps is not None:
             timestamps = np.asarray(timestamps)
-            dt = np.diff(timestamps)
-        else:
-            dt = np.full(n_frames - 1, self.dt)
+            # Use diff for intervals, but we need central dt
         
-        # Forward difference for first point
-        velocities[0] = (positions[1] - positions[0]) / dt[0]
-        
-        # Central difference for interior points
+        # Central difference: v[i] = (x[i+1] - x[i-1]) / (2*dt)
+        # We start from index 1 and go to n-2
         for i in range(1, n_frames - 1):
-            dt_central = timestamps[i+1] - timestamps[i-1] if timestamps is not None else 2 * self.dt
-            velocities[i] = (positions[i+1] - positions[i-1]) / dt_central
+            if timestamps is not None:
+                dt_central = timestamps[i+1] - timestamps[i-1]
+            else:
+                dt_central = 2 * self.dt
+                
+            if dt_central > 0:
+                velocities[i] = (positions[i+1] - positions[i-1]) / dt_central
         
-        # Backward difference for last point
-        velocities[-1] = (positions[-1] - positions[-2]) / dt[-1]
+        # For endpoints, since we cannot use forward/backward as per requirement,
+        # we will use the adjacent central difference value to maintain continuity.
+        if n_frames > 2:
+            velocities[0] = velocities[1]
+            velocities[-1] = velocities[-2]
         
         # Restore original shape
         return velocities.reshape(original_shape)
